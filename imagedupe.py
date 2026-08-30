@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-"""
-Image Dupe Detector (Perceptual dHash CLI)
-A fast, lightweight, and reliable duplicate image scanner and cleaner.
-"""
-
 import os
 import sys
 import time
@@ -16,7 +11,6 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# Ensure UTF-8 console output on Windows
 if sys.platform == "win32":
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -39,7 +33,6 @@ from rich.progress import (
 from rich.panel import Panel
 from rich.prompt import Confirm
 
-# Supported image extensions
 IMAGE_EXTENSIONS = {
     ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif",
     ".tiff", ".tif", ".jfif", ".avif", ".heic", ".ico"
@@ -48,24 +41,18 @@ IMAGE_EXTENSIONS = {
 console = Console(force_terminal=True)
 
 
-# =====================================================================
-# Process Controller & Cancellation Shortcuts ('q', 'Esc', 'Ctrl+C')
-# =====================================================================
 class ProcessController:
-    """Listens for keyboard interrupt shortcuts ('q', 'Esc', 'Ctrl+C') to cancel gracefully."""
+    """Manages graceful cancellation via keyboard shortcuts ('q', 'Esc', 'Ctrl+C')."""
 
     def __init__(self):
         self.stop_requested = threading.Event()
         self._listener_thread: Optional[threading.Thread] = None
-
-        # Setup standard signal handler for Ctrl+C
         signal.signal(signal.SIGINT, self._handle_sigint)
 
     def _handle_sigint(self, signum, frame):
         self.stop_requested.set()
 
     def start_key_listener(self):
-        """Starts non-blocking keypress listener on Windows."""
         if os.name == "nt":
             try:
                 import msvcrt
@@ -75,7 +62,6 @@ class ProcessController:
                         try:
                             if msvcrt.kbhit():
                                 ch = msvcrt.getch()
-                                # 'q', 'Q', Escape (\x1b), Ctrl+C (\x03)
                                 if ch in (b"q", b"Q", b"\x1b", b"\x03"):
                                     self.stop_requested.set()
                                     break
@@ -95,9 +81,6 @@ class ProcessController:
         return self.stop_requested.is_set()
 
 
-# =====================================================================
-# Windows Recycle Bin Support (Native ctypes - zero extra dependencies)
-# =====================================================================
 class SHFILEOPSTRUCTW(ctypes.Structure):
     _fields_ = [
         ("hwnd", ctypes.c_void_p),
@@ -113,12 +96,12 @@ class SHFILEOPSTRUCTW(ctypes.Structure):
 FO_DELETE = 3
 FOF_SILENT = 0x0004
 FOF_NOCONFIRMATION = 0x0010
-FOF_ALLOWUNDO = 0x0040  # Moves to Recycle Bin
+FOF_ALLOWUNDO = 0x0040
 FOF_NOERRORUI = 0x0400
 
 
 def send_to_recycle_bin(path: Path) -> bool:
-    """Send a file to the Windows Recycle Bin using shell32 API."""
+    """Move file to the Windows Recycle Bin using shell32 API."""
     try:
         p_from = str(path.resolve()) + "\0\0"
         fileop = SHFILEOPSTRUCTW()
@@ -160,14 +143,8 @@ def delete_file(path: Path, permanent: bool = False) -> Tuple[bool, str]:
                 return False, f"Deletion error: {e}"
 
 
-# =====================================================================
-# dHash Computation (Difference Hash)
-# =====================================================================
 def compute_dhash(image_path: Path, hash_size: int = 8) -> Optional[Tuple[int, int, int]]:
-    """
-    Computes a difference hash (dHash) and image resolution.
-    Returns: (dhash_integer_64bit, width, height) or None on failure.
-    """
+    """Compute difference hash (dHash) and image resolution (64-bit integer, width, height)."""
     try:
         with Image.open(image_path) as img:
             try:
@@ -176,15 +153,10 @@ def compute_dhash(image_path: Path, hash_size: int = 8) -> Optional[Tuple[int, i
                 pass
 
             width, height = img.size
-
-            # 1. Resize to (hash_size + 1, hash_size) grayscale (e.g. 9x8)
             resized = img.convert("L").resize((hash_size + 1, hash_size), Image.Resampling.BILINEAR)
             pixels = np.array(resized, dtype=np.int32)
-
-            # 2. Compare horizontal adjacent pixels (col[x] > col[x+1])
             diff = pixels[:, 1:] > pixels[:, :-1]
 
-            # 3. Convert boolean array into 64-bit integer
             decimal_hash = 0
             for bit in diff.flatten():
                 decimal_hash = (decimal_hash << 1) | int(bit)
@@ -195,15 +167,12 @@ def compute_dhash(image_path: Path, hash_size: int = 8) -> Optional[Tuple[int, i
 
 
 def hamming_distance(hash1: int, hash2: int) -> int:
-    """Calculates the number of differing bits between two 64-bit hashes."""
+    """Calculate the Hamming distance between two 64-bit hashes."""
     return (hash1 ^ hash2).bit_count()
 
 
-# =====================================================================
-# Persistent Cache (SQLite)
-# =====================================================================
 class HashCache:
-    """Caches computed dHash and file metadata to avoid recomputing on repeated runs."""
+    """Persists computed dHash and file metadata in SQLite to skip redundant processing."""
 
     def __init__(self, cache_db_path: Path):
         self.db_path = cache_db_path
@@ -257,9 +226,6 @@ class HashCache:
             pass
 
 
-# =====================================================================
-# Image Metadata Container
-# =====================================================================
 class ImageInfo:
     def __init__(self, path: Path, dhash: int, width: int, height: int, size_bytes: int, mtime: float):
         self.path = path
@@ -270,13 +236,7 @@ class ImageInfo:
         self.mtime = mtime
         self.pixels_count = width * height
 
-    def __repr__(self):
-        return f"<ImageInfo {self.path.name} ({self.width}x{self.height}, {self.size_bytes}B)>"
 
-
-# =====================================================================
-# Duplicate Grouping / Clustering (Union-Find)
-# =====================================================================
 class DisjointSet:
     def __init__(self, elements: List[ImageInfo]):
         self.parent = {elem: elem for elem in elements}
@@ -294,7 +254,7 @@ class DisjointSet:
 
 
 def cluster_duplicates(images: List[ImageInfo], threshold: int) -> List[List[ImageInfo]]:
-    """Groups images into clusters where each pair has Hamming distance <= threshold."""
+    """Groups images into duplicate clusters where pairwise Hamming distance <= threshold."""
     if len(images) < 2:
         return []
 
@@ -317,7 +277,7 @@ def cluster_duplicates(images: List[ImageInfo], threshold: int) -> List[List[Ima
 
 
 def select_best_image(group: List[ImageInfo], strategy: str = "highest-res") -> Tuple[ImageInfo, List[ImageInfo]]:
-    """Selects keeper image and returns (keeper, list_of_dupes_to_delete)."""
+    """Selects the keeper image based on chosen strategy and returns (keeper, list_of_duplicates)."""
     if strategy == "highest-res":
         sorted_group = sorted(
             group,
@@ -338,11 +298,8 @@ def select_best_image(group: List[ImageInfo], strategy: str = "highest-res") -> 
     return keeper, duplicates_to_delete
 
 
-# =====================================================================
-# Main Application Flow
-# =====================================================================
 def format_size(size_bytes: int) -> str:
-    """Human-readable file size."""
+    """Format bytes to human-readable string."""
     for unit in ["B", "KB", "MB", "GB"]:
         if size_bytes < 1024.0:
             return f"{size_bytes:.2f} {unit}"
@@ -351,7 +308,6 @@ def format_size(size_bytes: int) -> str:
 
 
 def process_image(path: Path, cache: HashCache, stop_event: Optional[threading.Event] = None) -> Optional[ImageInfo]:
-    """Process an image: check cache or compute dHash."""
     if stop_event and stop_event.is_set():
         return None
 
@@ -417,7 +373,6 @@ def run_scanner(
         border_style="blue"
     ))
 
-    # 1. Discover image files
     pattern = "**/*" if recursive else "*"
     all_files = [
         p for p in target_dir.glob(pattern)
@@ -430,11 +385,9 @@ def run_scanner(
 
     console.print(f"Found [bold cyan]{len(all_files)}[/bold cyan] image files. Computing perceptual hashes...")
 
-    # 2. Setup SQLite Cache in target directory
     cache_file = target_dir / ".imagedupe_cache.db"
     cache = HashCache(cache_file)
 
-    # 3. Hash computation with multi-threading & progress bar
     image_infos: List[ImageInfo] = []
     failed_count = 0
     was_cancelled = False
@@ -486,18 +439,16 @@ def run_scanner(
 
     console.print(f"Successfully processed [bold green]{len(image_infos)}[/bold green] images.")
 
-    # 4. Find Duplicate Clusters
     console.print("[cyan]Comparing hashes and clustering duplicates...[/cyan]")
     clusters = cluster_duplicates(image_infos, threshold=threshold)
 
     if not clusters:
-        console.print("\n[bold green][OK] No duplicate images found! Your folder is clean.[/bold green]")
+        console.print("\n[bold green][OK] No duplicate images found. Your folder is clean.[/bold green]")
         return
 
-    # 5. Build duplicate summary table
     total_dupes_count = 0
     total_reclaimable_bytes = 0
-    plan_to_delete: List[Tuple[ImageInfo, ImageInfo]] = []  # (dupe_to_delete, keeper)
+    plan_to_delete: List[Tuple[ImageInfo, ImageInfo]] = []
 
     table = Table(title="[bold yellow]Duplicate Groups Detected[/bold yellow]", show_lines=True, expand=True)
     table.add_column("Group", style="cyan", justify="center", width=7)
@@ -543,13 +494,11 @@ def run_scanner(
     )
     console.print(f"[bold green]Reclaimable Disk Space:[/bold green] [bold magenta]{format_size(total_reclaimable_bytes)}[/bold magenta]\n")
 
-    # 6. Action Execution (Dry-run or Delete)
     if dry_run:
         console.print("[bold yellow][INFO] Dry-run mode enabled. No files were deleted.[/bold yellow]")
         console.print("Run without [cyan]--dry-run[/cyan] to perform the deletion.")
         return
 
-    # Confirmation
     if not auto_confirm:
         dest_str = "permanently deleted" if permanent else "moved to the Recycle Bin"
         confirmed = Confirm.ask(
@@ -560,7 +509,6 @@ def run_scanner(
             console.print("[yellow]Operation cancelled by user. No files were deleted.[/yellow]")
             return
 
-    # Perform deletion
     deleted_count = 0
     failed_delete = 0
     deleted_bytes = 0
@@ -596,11 +544,8 @@ def run_scanner(
         console.print(f"[bold red]Failed to delete {failed_delete} files.[/bold red]")
 
 
-# =====================================================================
-# CLI Entrypoint
-# =====================================================================
 def resolve_directory_path(raw_path: str) -> Path:
-    """Expands ~, %USERPROFILE%, and resolves shortcuts like 'Pictures' or 'Downloads'."""
+    """Expands ~, %USERPROFILE%, and resolves library shortcuts ('Pictures', 'Downloads', etc.)."""
     clean_str = raw_path.strip('"\'')
     expanded = os.path.expandvars(os.path.expanduser(clean_str))
     path = Path(expanded)
@@ -628,13 +573,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Scan your Windows Pictures folder in dry-run mode
   python imagedupe.py Pictures -r --dry-run
-
-  # Scan with full path
   python imagedupe.py "C:\\Users\\YourName\\Pictures" -r
-
-  # Scan with shortcut or tilde
   python imagedupe.py ~/Pictures -r -y
         """
     )
