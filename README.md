@@ -36,25 +36,37 @@ Scan a directory and preview duplicate groups and reclaimable disk space without
 python imagedupe.py "C:\path\to\your\images" --dry-run
 ```
 
-### 2. Scan and Clean (Interactive Prompt)
+### 2. Using Directory Shortcuts
+You don't need to type full paths for common user folders. You can pass shortcuts like `Pictures`, `Downloads`, `Desktop`, or `~/Pictures`:
+```bash
+python imagedupe.py Pictures -r --dry-run
+```
+
+### 3. Scan and Clean (Interactive Prompt)
 Scan a folder and prompt for confirmation before moving duplicates to the Windows Recycle Bin:
 ```bash
 python imagedupe.py "C:\path\to\your\images"
 ```
 
-### 3. Recursive Subfolder Scanning
+### 4. Recursive Subfolder Scanning (`-r`)
 Scan all subfolders recursively using `-r`:
 ```bash
-python imagedupe.py "C:\path\to\your\images" -r
+python imagedupe.py Pictures -r
 ```
 
-### 4. Auto-Confirm Deletion
-Bypass the confirmation prompt for automated / script workflows:
+### 5. Multi-Threaded Acceleration (`--threads`)
+Specify the number of worker threads for parallel image hashing (default: `8`). Increase this on multi-core CPUs and fast SSDs for large photo libraries (e.g. 10,000+ photos):
 ```bash
-python imagedupe.py "C:\path\to\your\images" -y
+python imagedupe.py Pictures -r --threads 16
 ```
 
-### 5. Adjust Similarity Tolerance (`--threshold`)
+### 6. Auto-Confirm Deletion (`-y` / `--yes`)
+Bypass the interactive confirmation prompt for automated or script workflows:
+```bash
+python imagedupe.py Pictures -r -y
+```
+
+### 7. Adjust Similarity Tolerance (`-t` / `--threshold`)
 The Hamming distance determines how strictly images must match (default is `2`):
 - `0`: Exact visual match (identical pixels or exact resize).
 - `1` – `2`: Near-identical (recompressed JPEG, resized, minor noise). *(Default)*
@@ -62,13 +74,13 @@ The Hamming distance determines how strictly images must match (default is `2`):
 
 ```bash
 # Stricter match
-python imagedupe.py "C:\path\to\your\images" --threshold 1
+python imagedupe.py Pictures -r --threshold 1
 
 # Looser match
-python imagedupe.py "C:\path\to\your\images" --threshold 4
+python imagedupe.py Pictures -r --threshold 4
 ```
 
-### 6. Retention Strategy (`--keep`)
+### 8. Retention Strategy (`--keep`)
 Choose which image to preserve in each duplicate group:
 - `highest-res`: Keep highest resolution image *(Default)*
 - `largest-file`: Keep largest file size in bytes
@@ -76,14 +88,54 @@ Choose which image to preserve in each duplicate group:
 - `newest`: Keep newest file created/modified
 
 ```bash
-python imagedupe.py "C:\path\to\your\images" --keep largest-file
+python imagedupe.py Pictures -r --keep largest-file
 ```
 
-### 7. Permanent Deletion (`--permanent`)
+### 9. Permanent Deletion (`--permanent`)
 Permanently deletes duplicates instead of moving them to the Windows Recycle Bin:
 ```bash
-python imagedupe.py "C:\path\to\your\images" --permanent
+python imagedupe.py Pictures -r --permanent -y
 ```
+
+---
+
+## All CLI Flags & Options Reference
+
+| Flag | Short | Type | Default | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| `directory` | | Positional | `.` (current dir) | Target directory path or shortcut (`Pictures`, `Downloads`, `Desktop`, `Documents`, `~/Pictures`) |
+| `--recursive` | `-r` | Flag | `False` | Scan subdirectories recursively |
+| `--threshold` | `-t` | Integer | `2` | Hamming distance tolerance (`0` = exact match, `1-4` = near match) |
+| `--keep` | | Choice | `highest-res` | Image preservation strategy: `highest-res`, `largest-file`, `oldest`, `newest` |
+| `--threads` | | Integer | `8` | Number of parallel worker threads for image hashing |
+| `--dry-run` | | Flag | `False` | Preview duplicates and reclaimable space without modifying or deleting files |
+| `--permanent` | | Flag | `False` | Permanently delete duplicates instead of sending to Windows Recycle Bin |
+| `--yes` | `-y` | Flag | `False` | Bypass confirmation prompt before deleting files |
+
+---
+
+## Combining Flags & Shortcuts
+
+You can combine any flags and bundle single-letter options:
+
+```bash
+# Scan Pictures recursively, auto-confirm delete, keep largest file, with 16 threads:
+python imagedupe.py Pictures -ry --keep largest-file --threads 16
+
+# Dry-run scan with loose threshold on Downloads:
+python imagedupe.py Downloads -r --dry-run -t 4
+```
+
+---
+
+## Stopping a Scan Mid-Process
+
+You can safely interrupt a scan at any time by pressing:
+- **`q`** (or **`Q`**)
+- **`Esc`**
+- **`Ctrl + C`**
+
+All hashes computed up to that moment are safely preserved in `.imagedupe_cache.db`, so subsequent runs will resume instantly without re-hashing previously processed files.
 
 ---
 
