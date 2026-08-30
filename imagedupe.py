@@ -6,9 +6,12 @@ A fast, lightweight, and reliable duplicate image scanner and cleaner.
 
 import os
 import sys
+import time
+import signal
 import ctypes
 import sqlite3
 import argparse
+import threading
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -46,6 +49,53 @@ console = Console(force_terminal=True)
 
 
 # =====================================================================
+# Process Controller & Cancellation Shortcuts ('q', 'Esc', 'Ctrl+C')
+# =====================================================================
+class ProcessController:
+    """Listens for keyboard interrupt shortcuts ('q', 'Esc', 'Ctrl+C') to cancel gracefully."""
+
+    def __init__(self):
+        self.stop_requested = threading.Event()
+        self._listener_thread: Optional[threading.Thread] = None
+
+        # Setup standard signal handler for Ctrl+C
+        signal.signal(signal.SIGINT, self._handle_sigint)
+
+    def _handle_sigint(self, signum, frame):
+        self.stop_requested.set()
+
+    def start_key_listener(self):
+        """Starts non-blocking keypress listener on Windows."""
+        if os.name == "nt":
+            try:
+                import msvcrt
+
+                def _listen():
+                    while not self.stop_requested.is_set():
+                        try:
+                            if msvcrt.kbhit():
+                                ch = msvcrt.getch()
+                                # 'q', 'Q', Escape (\x1b), Ctrl+C (\x03)
+                                if ch in (b"q", b"Q", b"\x1b", b"\x03"):
+                                    self.stop_requested.set()
+                                    break
+                        except Exception:
+                            pass
+                        time.sleep(0.05)
+
+                self._listener_thread = threading.Thread(target=_listen, daemon=True)
+                self._listener_thread.start()
+            except Exception:
+                pass
+
+    def stop_key_listener(self):
+        self.stop_requested.set()
+
+    def is_stopped(self) -> bool:
+        return self.stop_requested.is_set()
+
+
+# =====================================================================
 # Windows Recycle Bin Support (Native ctypes - zero extra dependencies)
 # =====================================================================
 class SHFILEOPSTRUCTW(ctypes.Structure):
@@ -70,7 +120,6 @@ FOF_NOERRORUI = 0x0400
 def send_to_recycle_bin(path: Path) -> bool:
     """Send a file to the Windows Recycle Bin using shell32 API."""
     try:
-        # Path must be double-null terminated for SHFileOperationW
         p_from = str(path.resolve()) + "\0\0"
         fileop = SHFILEOPSTRUCTW()
         fileop.hwnd = None
@@ -104,7 +153,6 @@ def delete_file(path: Path, permanent: bool = False) -> Tuple[bool, str]:
         if success:
             return True, "Moved to Recycle Bin"
         else:
-            # Fallback to direct unlink if shell operation fails
             try:
                 path.unlink()
                 return True, "Permanently deleted (Recycle Bin fallback)"
@@ -122,7 +170,6 @@ def compute_dhash(image_path: Path, hash_size: int = 8) -> Optional[Tuple[int, i
     """
     try:
         with Image.open(image_path) as img:
-            # Handle EXIF orientation if present
             try:
                 img = ImageOps.exif_transpose(img)
             except Exception:
@@ -130,8 +177,7 @@ def compute_dhash(image_path: Path, hash_size: int = 8) -> Optional[Tuple[int, i
 
             width, height = img.size
 
-            # 1. Resize to (hash_size + 1, hash_size) grayscale
-            # For 8x8 hash, resize to 9x8 pixels
+            # 1. Resize to (hash_size + 1, hash_size) grayscale (e.g. 9x8)
             resized = img.convert("L").resize((hash_size + 1, hash_size), Image.Resampling.BILINEAR)
             pixels = np.array(resized, dtype=np.int32)
 
@@ -189,7 +235,6 @@ class HashCache:
                 row = cursor.fetchone()
                 if row:
                     cached_mtime, cached_size, cached_dhash, width, height = row
-                    # Ensure file hasn't been modified since cached
                     if abs(cached_mtime - stat.st_mtime) < 0.001 and cached_size == stat.st_size:
                         return int(cached_dhash), width, height
         except Exception:
@@ -256,7 +301,6 @@ def cluster_duplicates(images: List[ImageInfo], threshold: int) -> List[List[Ima
     dsu = DisjointSet(images)
     n = len(images)
 
-    # Pairwise comparison
     for i in range(n):
         h1 = images[i].dhash
         for j in range(i + 1, n):
@@ -264,27 +308,17 @@ def cluster_duplicates(images: List[ImageInfo], threshold: int) -> List[List[Ima
             if dist <= threshold:
                 dsu.union(images[i], images[j])
 
-    # Group by representative root
     clusters: Dict[ImageInfo, List[ImageInfo]] = {}
     for img in images:
         root = dsu.find(img)
         clusters.setdefault(root, []).append(img)
 
-    # Filter out singletons (groups with only 1 image have no duplicates)
     return [group for group in clusters.values() if len(group) > 1]
 
 
 def select_best_image(group: List[ImageInfo], strategy: str = "highest-res") -> Tuple[ImageInfo, List[ImageInfo]]:
-    """
-    Selects the 'best' image to keep and returns (keeper, list_of_dupes_to_delete).
-    Strategies:
-      - 'highest-res': Highest resolution (w*h), then largest file size, then oldest file
-      - 'largest-file': Largest file size in bytes
-      - 'oldest': Oldest creation / modification time
-      - 'newest': Newest creation / modification time
-    """
+    """Selects keeper image and returns (keeper, list_of_dupes_to_delete)."""
     if strategy == "highest-res":
-        # Sort key: (resolution DESC, file size DESC, mtime ASC)
         sorted_group = sorted(
             group,
             key=lambda x: (x.pixels_count, x.size_bytes, -x.mtime),
@@ -316,14 +350,19 @@ def format_size(size_bytes: int) -> str:
     return f"{size_bytes:.2f} TB"
 
 
-def process_image(path: Path, cache: HashCache) -> Optional[ImageInfo]:
+def process_image(path: Path, cache: HashCache, stop_event: Optional[threading.Event] = None) -> Optional[ImageInfo]:
     """Process an image: check cache or compute dHash."""
+    if stop_event and stop_event.is_set():
+        return None
+
     try:
         stat = path.stat()
         cached = cache.get(path)
         if cached is not None:
             dhash, width, height = cached
         else:
+            if stop_event and stop_event.is_set():
+                return None
             result = compute_dhash(path)
             if result is None:
                 return None
@@ -357,6 +396,9 @@ def run_scanner(
         console.print(f"[bold red]Error:[/bold red] '{target_dir}' is not a valid directory.")
         sys.exit(1)
 
+    controller = ProcessController()
+    controller.start_key_listener()
+
     action_text = (
         "[bold yellow]DRY RUN (Preview Only)[/bold yellow]"
         if dry_run
@@ -369,7 +411,8 @@ def run_scanner(
         f"[white]Recursive:[/white] {recursive}  |  "
         f"[white]Threshold (Hamming Dist):[/white] [yellow]{threshold}[/yellow]  |  "
         f"[white]Keep Strategy:[/white] [magenta]{keep_strategy}[/magenta]\n"
-        f"[white]Action:[/white] {action_text}",
+        f"[white]Action:[/white] {action_text}\n"
+        f"[dim]Stop Shortcut: Press [bold yellow]'q'[/bold yellow], [bold yellow]Esc[/bold yellow], or [bold yellow]Ctrl+C[/bold yellow] at any time to stop safely.[/dim]",
         title="[bold blue]Configuration[/bold blue]",
         border_style="blue"
     ))
@@ -394,26 +437,49 @@ def run_scanner(
     # 3. Hash computation with multi-threading & progress bar
     image_infos: List[ImageInfo] = []
     failed_count = 0
+    was_cancelled = False
 
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        MofNCompleteColumn(),
-        TimeRemainingColumn(),
-        console=console
-    ) as progress:
-        task = progress.add_task("[cyan]Hashing images...", total=len(all_files))
+    try:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            TimeRemainingColumn(),
+            console=console
+        ) as progress:
+            task = progress.add_task("[cyan]Hashing images (Press 'q'/Esc/Ctrl+C to stop)...", total=len(all_files))
 
-        with ThreadPoolExecutor(max_workers=threads) as executor:
-            future_to_file = {executor.submit(process_image, p, cache): p for p in all_files}
-            for future in as_completed(future_to_file):
-                info = future.result()
-                if info is not None:
-                    image_infos.append(info)
-                else:
-                    failed_count += 1
-                progress.advance(task)
+            with ThreadPoolExecutor(max_workers=threads) as executor:
+                future_to_file = {
+                    executor.submit(process_image, p, cache, controller.stop_requested): p
+                    for p in all_files
+                }
+
+                for future in as_completed(future_to_file):
+                    if controller.is_stopped():
+                        was_cancelled = True
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        break
+
+                    try:
+                        info = future.result()
+                        if info is not None:
+                            image_infos.append(info)
+                        else:
+                            failed_count += 1
+                    except Exception:
+                        failed_count += 1
+
+                    progress.advance(task)
+    except KeyboardInterrupt:
+        was_cancelled = True
+        controller.stop_requested.set()
+
+    if was_cancelled or controller.is_stopped():
+        console.print(f"\n[bold yellow][!] Process stopped by user ('q' / Esc / Ctrl+C).[/bold yellow]")
+        console.print(f"[green][OK] Saved {len(image_infos)} image hashes to cache database. Progress was not lost.[/green]")
+        return
 
     if failed_count > 0:
         console.print(f"[yellow]Warning: Failed to process {failed_count} unreadable/corrupted files.[/yellow]")
@@ -444,7 +510,6 @@ def run_scanner(
     for group_idx, group in enumerate(clusters, start=1):
         keeper, dupes = select_best_image(group, strategy=keep_strategy)
 
-        # Print keeper row
         rel_keeper_dir = keeper.path.parent.name
         table.add_row(
             str(group_idx),
@@ -510,6 +575,10 @@ def run_scanner(
         del_task = progress.add_task("[red]Deleting duplicates...", total=len(plan_to_delete))
 
         for dupe, _ in plan_to_delete:
+            if controller.is_stopped():
+                console.print("\n[bold yellow][!] Deletion stopped by user.[/bold yellow]")
+                break
+
             success, msg = delete_file(dupe.path, permanent=permanent)
             if success:
                 deleted_count += 1
@@ -539,7 +608,6 @@ def resolve_directory_path(raw_path: str) -> Path:
     if path.exists():
         return path
 
-    # Check for known Windows library shortcuts if relative path doesn't exist
     shortcut_map = {
         "pictures": Path.home() / "Pictures",
         "downloads": Path.home() / "Downloads",

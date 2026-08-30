@@ -11,6 +11,7 @@ A lightweight, high-performance command-line tool to scan, identify, and clean d
 - **Smart Quality Retention**: Automatically keeps the **highest resolution / best quality** image in each duplicate group and marks lower-quality duplicates for removal.
 - **Safety First**:
   - **Recycle Bin Integration**: On Windows, deleted files are moved to the Recycle Bin by default, making deletions undoable.
+  - **Instant Cancellation Shortcuts**: Press **`q`**, **`Esc`**, or **`Ctrl+C`** at any time to safely stop the process without losing cached progress.
   - **Dry-Run Preview (`--dry-run`)**: Preview duplicates, file sizes, and reclaimable disk space before touching files.
   - **Interactive Confirmation**: Prompts for confirmation before mass deletion (unless `-y` is passed).
 - **Persistent Hash Caching**: Hashes and file metadata are saved in a local SQLite cache (`.imagedupe_cache.db`), so rescanning large folders only processes new or modified files.
